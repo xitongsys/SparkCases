@@ -2,7 +2,7 @@
 
 In my usage, I don't need the shuffle and sort node before `flatMapGroupsWithState`. So I create the `flatMapGroupsWithStateWithoutShuffleSort`.
 
-The code changes you can found [here]().
+The code changes you can found [here](https://github.com/xitongsys/spark/pull/1).
 
 You should compile you codes and you can use your new defined operators.
 
