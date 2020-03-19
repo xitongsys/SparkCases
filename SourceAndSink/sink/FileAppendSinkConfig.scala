@@ -1,6 +1,5 @@
 import java.io.{IOException, ObjectInputStream, ObjectOutputStream}
 
-import com.microsoft.ads.bi.util.UetConstants
 import org.apache.hadoop.conf.Configuration
 import org.apache.spark.{SparkConf, SparkContext}
 import scala.util.control.NonFatal
