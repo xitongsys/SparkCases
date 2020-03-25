@@ -76,7 +76,7 @@ It defines a accumulate variable `eventTimeStats` to record the statistical even
   }
 ```
 
-`WatermarkTracker.scala` define the updateWatermark. This function fill collect all EventTimeWatermarkExec in the physical plan and get the eventtime of every node. If no data int that node, it will use 0 as the watermark of that node. It means if no data of some stage, the wathermark will be 0 which is the smallest value.
+`WatermarkTracker.scala` define the updateWatermark. This function fill collect all EventTimeWatermarkExec in the physical plan and get the eventtime of every node. **If no data int that node, it will use 0 as the watermark of that node. It means if no data of some stage, the wathermark will be 0 which is the smallest value.**
 
 ```scala
  /** Tracks the watermark value of a streaming query based on a given `policy` */
@@ -126,5 +126,44 @@ case class WatermarkTracker(policy: MultipleWatermarkPolicy) extends Logging {
   def currentWatermark: Long = synchronized { globalWatermarkMs }
 }
 ```
+GlobalWatermark will be written in checkpoints `offsets` and `commits`, which are defined in `StreamExecution`
+```scala
+  /**
+   * A write-ahead-log that records the offsets that are present in each batch. In order to ensure
+   * that a given batch will always consist of the same data, we write to this log *before* any
+   * processing is done.  Thus, the Nth record in this log indicated data that is currently being
+   * processed and the N-1th entry indicates which offsets have been durably committed to the sink.
+   */
+  val offsetLog = new OffsetSeqLog(sparkSession, checkpointFile("offsets"))
 
+  /**
+   * A log that records the batch ids that have completed. This is used to check if a batch was
+   * fully processed, and its output was committed to the sink, hence no need to process it again.
+   * This is used (for instance) during restart, to help identify which batch to run next.
+   */
+  val commitLog = new CommitLog(sparkSession, checkpointFile("commits"))
+```
 
+`offsets` example: `cf adl cat application_1583869491667_14542/checkpoint/offsets/0`
+```json
+v1
+{"batchWatermarkMs":0,"batchTimestampMs":1584612918417,"conf":{"spark.sql.streaming.stateStore.providerClass":"org.apache.spark.sql.execution.streaming.state.HDFSBackedStateStorePr
+ovider","spark.sql.streaming.flatMapGroupsWithState.stateFormatVersion":"2","spark.sql.streaming.multipleWatermarkPolicy":"min","spark.sql.streaming.aggregation.stateFormatVersion"
+:"2","spark.sql.shuffle.partitions":"512"}}
+{"uetevents-raw":{"137":10605526,"146":10605427,"218":1
+```
+
+`commits` example: ` cf adl cat application_1583869491667_14542/checkpoint/commits/0`
+```json
+v1
+{"nextBatchWatermarkMs":0}
+```
+
+In `IncrementalExecution.scala`, when construct next batch execution, it will set the new watermark in some operators(i.e. FlatMapGroupWithStates) which need it.
+```scala
+      case m: FlatMapGroupsWithStateExec =>
+        m.copy(
+          stateInfo = Some(nextStatefulOperationStateInfo),
+          batchTimestampMs = Some(offsetSeqMetadata.batchTimestampMs),
+          eventTimeWatermark = Some(offsetSeqMetadata.batchWatermarkMs))
+```
