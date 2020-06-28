@@ -593,6 +593,113 @@ Get/Put/Remove key-value and write to delta file.
 ```
 
 
+Delta file format:
+
+```scala
+ private def writeUpdateToDeltaFile(
+      output: DataOutputStream,
+      key: UnsafeRow,
+      value: UnsafeRow): Unit = {
+    val keyBytes = key.getBytes()
+    val valueBytes = value.getBytes()
+    output.writeInt(keyBytes.size)
+    output.write(keyBytes)
+    output.writeInt(valueBytes.size)
+    output.write(valueBytes)
+  }
+
+  private def writeRemoveToDeltaFile(output: DataOutputStream, key: UnsafeRow): Unit = {
+    val keyBytes = key.getBytes()
+    output.writeInt(keyBytes.size)
+    output.write(keyBytes)
+    output.writeInt(-1)
+  }
+
+  private def finalizeDeltaFile(output: DataOutputStream): Unit = {
+    output.writeInt(-1)  // Write this magic number to signify end of file
+    output.close()
+  }
+
+  private def updateFromDeltaFile(version: Long, map: MapType): Unit = {
+    val fileToRead = deltaFile(version)
+    var input: DataInputStream = null
+    val sourceStream = try {
+      fm.open(fileToRead)
+    } catch {
+      case f: FileNotFoundException =>
+        throw new IllegalStateException(
+          s"Error reading delta file $fileToRead of $this: $fileToRead does not exist", f)
+    }
+    try {
+      input = decompressStream(sourceStream)
+      var eof = false
+
+      while(!eof) {
+        val keySize = input.readInt()
+        if (keySize == -1) {
+          eof = true
+        } else if (keySize < 0) {
+          throw new IOException(
+            s"Error reading delta file $fileToRead of $this: key size cannot be $keySize")
+        } else {
+          val keyRowBuffer = new Array[Byte](keySize)
+          ByteStreams.readFully(input, keyRowBuffer, 0, keySize)
+
+          val keyRow = new UnsafeRow(keySchema.fields.length)
+          keyRow.pointTo(keyRowBuffer, keySize)
+
+          val valueSize = input.readInt()
+          if (valueSize < 0) {
+            map.remove(keyRow)
+          } else {
+            val valueRowBuffer = new Array[Byte](valueSize)
+            ByteStreams.readFully(input, valueRowBuffer, 0, valueSize)
+            val valueRow = new UnsafeRow(valueSchema.fields.length)
+            // If valueSize in existing file is not multiple of 8, floor it to multiple of 8.
+            // This is a workaround for the following:
+            // Prior to Spark 2.3 mistakenly append 4 bytes to the value row in
+            // `RowBasedKeyValueBatch`, which gets persisted into the checkpoint data
+            valueRow.pointTo(valueRowBuffer, (valueSize / 8) * 8)
+            map.put(keyRow, valueRow)
+          }
+        }
+      }
+    } finally {
+      if (input != null) input.close()
+    }
+    logInfo(s"Read delta file for version $version of $this from $fileToRead")
+  }
+
+  private def writeSnapshotFile(version: Long, map: MapType): Unit = {
+    val targetFile = snapshotFile(version)
+    var rawOutput: CancellableFSDataOutputStream = null
+    var output: DataOutputStream = null
+    try {
+      rawOutput = fm.createAtomic(targetFile, overwriteIfPossible = true)
+      output = compressStream(rawOutput)
+      val iter = map.entrySet().iterator()
+      while(iter.hasNext) {
+        val entry = iter.next()
+        val keyBytes = entry.getKey.getBytes()
+        val valueBytes = entry.getValue.getBytes()
+        output.writeInt(keyBytes.size)
+        output.write(keyBytes)
+        output.writeInt(valueBytes.size)
+        output.write(valueBytes)
+      }
+      output.writeInt(-1)
+      output.close()
+    } catch {
+      case e: Throwable =>
+        cancelDeltaFile(compressedStream = output, rawStream = rawOutput)
+        throw e
+    }
+    logInfo(s"Written snapshot file for version $version of $this at $targetFile")
+  }
+
+```
+
+
 
 
 
