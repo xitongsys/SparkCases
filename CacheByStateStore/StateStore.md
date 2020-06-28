@@ -1,11 +1,15 @@
 # Spark StateStore
 
 ## StateStore Files
-**StateStore**
-**StateStoreConf**
-**StateStoreCoordinator**
-**StateStoreRDD**
-**HDFSBackedStateStoreProvider**
+**StateStore.scala**
+
+**StateStoreConf.scala**
+
+**StateStoreCoordinator.scala**
+
+**StateStoreRDD.scala**
+
+**HDFSBackedStateStoreProvider.scala**
 
 ## Mechanism
 1. StateStoreCoordinator runs on driver and create an RPC endpoint for executors.
@@ -185,9 +189,76 @@ StateStoreRDD use the endpoint to get the RDD location info:
     storeCoordinator.flatMap(_.getLocation(stateStoreProviderId)).toSeq
 ```
 
+## StateStoreProvider
+```scala
+/**
+ * Trait representing a provider that provide [[StateStore]] instances representing
+ * versions of state data.
+ *
+ * The life cycle of a provider and its provide stores are as follows.
+ *
+ * - A StateStoreProvider is created in a executor for each unique [[StateStoreId]] when
+ *   the first batch of a streaming query is executed on the executor. All subsequent batches reuse
+ *   this provider instance until the query is stopped.
+ *
+ * - Every batch of streaming data request a specific version of the state data by invoking
+ *   `getStore(version)` which returns an instance of [[StateStore]] through which the required
+ *   version of the data can be accessed. It is the responsible of the provider to populate
+ *   this store with context information like the schema of keys and values, etc.
+ *
+ * - After the streaming query is stopped, the created provider instances are lazily disposed off.
+ */
+trait StateStoreProvider {
+
+  /**
+   * Initialize the provide with more contextual information from the SQL operator.
+   * This method will be called first after creating an instance of the StateStoreProvider by
+   * reflection.
+   *
+   * @param stateStoreId Id of the versioned StateStores that this provider will generate
+   * @param keySchema Schema of keys to be stored
+   * @param valueSchema Schema of value to be stored
+   * @param keyIndexOrdinal Optional column (represent as the ordinal of the field in keySchema) by
+   *                        which the StateStore implementation could index the data.
+   * @param storeConfs Configurations used by the StateStores
+   * @param hadoopConf Hadoop configuration that could be used by StateStore to save state data
+   */
+  def init(
+      stateStoreId: StateStoreId,
+      keySchema: StructType,
+      valueSchema: StructType,
+      keyIndexOrdinal: Option[Int], // for sorting the data by their keys
+      storeConfs: StateStoreConf,
+      hadoopConf: Configuration): Unit
+
+  /**
+   * Return the id of the StateStores this provider will generate.
+   * Should be the same as the one passed in init().
+   */
+  def stateStoreId: StateStoreId
+
+  /** Called when the provider instance is unloaded from the executor */
+  def close(): Unit
+
+  /** Return an instance of [[StateStore]] representing state data of the given version */
+  def getStore(version: Long): StateStore
+
+  /** Optional method for providers to allow for background maintenance (e.g. compactions) */
+  def doMaintenance(): Unit = { }
+
+  /**
+   * Optional custom metrics that the implementation may want to report.
+   * @note The StateStore objects created by this provider must report the same custom metrics
+   * (specifically, same names) through `StateStore.metrics`.
+   */
+  def supportedCustomMetrics: Seq[StateStoreCustomMetric] = Nil
+}
+
+```
 
 
-## StateStore Codes
+
+## StateStore
 ```scala
 package org.apache.spark.sql.execution.streaming.state
 
@@ -196,9 +267,80 @@ package org.apache.spark.sql.execution.streaming.state
  * version of state data, and such instances are created through a [[StateStoreProvider]].
  */
 trait StateStore {
+
+  /** Unique identifier of the store */
+  def id: StateStoreId
+
+  /** Version of the data in this store before committing updates. */
+  def version: Long
+
+  /**
+   * Get the current value of a non-null key.
+   * @return a non-null row if the key exists in the store, otherwise null.
+   */
+  def get(key: UnsafeRow): UnsafeRow
+
+  /**
+   * Put a new value for a non-null key. Implementations must be aware that the UnsafeRows in
+   * the params can be reused, and must make copies of the data as needed for persistence.
+   */
+  def put(key: UnsafeRow, value: UnsafeRow): Unit
+
+  /**
+   * Remove a single non-null key.
+   */
+  def remove(key: UnsafeRow): Unit
+
+  /**
+   * Get key value pairs with optional approximate `start` and `end` extents.
+   * If the State Store implementation maintains indices for the data based on the optional
+   * `keyIndexOrdinal` over fields `keySchema` (see `StateStoreProvider.init()`), then it can use
+   * `start` and `end` to make a best-effort scan over the data. Default implementation returns
+   * the full data scan iterator, which is correct but inefficient. Custom implementations must
+   * ensure that updates (puts, removes) can be made while iterating over this iterator.
+   *
+   * @param start UnsafeRow having the `keyIndexOrdinal` column set with appropriate starting value.
+   * @param end UnsafeRow having the `keyIndexOrdinal` column set with appropriate ending value.
+   * @return An iterator of key-value pairs that is guaranteed not miss any key between start and
+   *         end, both inclusive.
+   */
+  def getRange(start: Option[UnsafeRow], end: Option[UnsafeRow]): Iterator[UnsafeRowPair] = {
+    iterator()
+  }
+
+  /**
+   * Commit all the updates that have been made to the store, and return the new version.
+   * Implementations should ensure that no more updates (puts, removes) can be after a commit in
+   * order to avoid incorrect usage.
+   */
+  def commit(): Long
+
+  /**
+   * Abort all the updates that have been made to the store. Implementations should ensure that
+   * no more updates (puts, removes) can be after an abort in order to avoid incorrect usage.
+   */
+  def abort(): Unit
+
+  /**
+   * Return an iterator containing all the key-value pairs in the StateStore. Implementations must
+   * ensure that updates (puts, removes) can be made while iterating over this iterator.
+   */
+  def iterator(): Iterator[UnsafeRowPair]
+
+  /** Current metrics of the state store */
+  def metrics: StateStoreMetrics
+
+  /**
+   * Whether all updates have been committed
+   */
+  def hasCommitted: Boolean
+}
+
 ```
 
+
 For now, it only implements the ```HDFSBackedStateStoreProvider```. 
+
 StateStore is a ```type MapType = java.util.concurrent.ConcurrentHashMap[UnsafeRow, UnsafeRow]```
 
 In ```StateStore.scala```, it has a global variable HashMap to store different StateStore
@@ -220,6 +362,8 @@ object StateStore extends Logging {
   private val loadedProviders = new mutable.HashMap[StateStoreProviderId, StateStoreProvider]()
 
 ```
+
+## HDFSBackedStateStoreProvider
 
 You can use ```StateStore.get()``` to get a version of store.
 ```scala
