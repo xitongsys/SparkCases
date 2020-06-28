@@ -3,13 +3,7 @@ In my usage, I implements a cache by Spark StateStore, which leveage the StateSt
 
 ## Cache Codes
 ```scala
-/**
-  * Copyright (c) Microsoft. All rights reserved.
-  *
-  * Cache implemented by StateStore.
-  */
-
-package com.microsoft.ads.bi.cache
+package cache
 
 import java.sql.Timestamp
 import java.util.UUID
