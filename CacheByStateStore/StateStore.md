@@ -168,7 +168,7 @@ Executors use the endpoint to report its status
 
 StateStoreRDD use the endpoint to get the RDD location info:
 
-***StateStoreCoordinator.scala**
+**StateStoreCoordinator.scala**
 ```scala
   /** Get the location of the state store */
   private[sql] def getLocation(stateStoreProviderId: StateStoreProviderId): Option[String] = {
